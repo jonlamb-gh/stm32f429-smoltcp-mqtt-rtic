@@ -542,6 +542,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mqtt-rtic"
+version = "0.1.0"
+dependencies = [
+ "asm-delay",
+ "built",
+ "cortex-m 0.7.4",
+ "cortex-m-rt",
+ "cortex-m-rtic",
+ "heapless",
+ "log",
+ "miniconf",
+ "minimq",
+ "modular-bitfield",
+ "panic-rtt-target",
+ "rand_core",
+ "rtic-monotonic",
+ "rtt-logger",
+ "rtt-target",
+ "serde",
+ "serde-json-core",
+ "shared-bus-rtic",
+ "smoltcp",
+ "smoltcp-nal",
+ "stm32-eth",
+ "stm32f4xx-hal",
+ "systick-monotonic",
+]
+
+[[package]]
 name = "nanorand"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -978,33 +1007,6 @@ dependencies = [
  "cortex-m 0.7.4",
  "cortex-m-rt",
  "vcell",
-]
-
-[[package]]
-name = "stm32f429-smoltcp-mqtt-rtic"
-version = "0.1.0"
-dependencies = [
- "asm-delay",
- "built",
- "cortex-m 0.7.4",
- "cortex-m-rt",
- "cortex-m-rtic",
- "log",
- "miniconf",
- "minimq",
- "modular-bitfield",
- "panic-rtt-target",
- "rtic-monotonic",
- "rtt-logger",
- "rtt-target",
- "serde",
- "serde-json-core",
- "shared-bus-rtic",
- "smoltcp",
- "smoltcp-nal",
- "stm32-eth",
- "stm32f4xx-hal",
- "systick-monotonic",
 ]
 
 [[package]]

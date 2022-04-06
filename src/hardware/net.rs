@@ -4,11 +4,6 @@ use smoltcp::{
     wire::{IpAddress, IpCidr, Ipv4Address, Ipv4Cidr},
 };
 
-// TODO - use option_env! and FromStr impl to tweak these
-// or put them in flash for config
-pub const SRC_MAC: [u8; 6] = [0x02, 0x00, 0x05, 0x06, 0x07, 0x08];
-pub const SRC_IP: [u8; 4] = [192, 168, 1, 39];
-
 const NUM_TCP_SOCKETS: usize = 4;
 const NUM_UDP_SOCKETS: usize = 1;
 const NUM_SOCKETS: usize = NUM_UDP_SOCKETS + NUM_TCP_SOCKETS;
@@ -35,7 +30,8 @@ pub struct NetStorage {
 impl NetStorage {
     pub const fn new() -> Self {
         Self {
-            ip_addrs: [IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address(SRC_IP), 24)); 1],
+            // NOTE: IP address set at runtime
+            ip_addrs: [IpCidr::Ipv4(Ipv4Cidr::new(Ipv4Address::UNSPECIFIED, 24)); 1],
             sockets: [SocketStorage::EMPTY; NUM_SOCKETS],
             tcp_socket_storage: [TcpSocketStorage::INIT; NUM_TCP_SOCKETS],
             udp_socket_storage: [UdpSocketStorage::new(); NUM_UDP_SOCKETS],

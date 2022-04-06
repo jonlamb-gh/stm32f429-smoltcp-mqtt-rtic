@@ -1,29 +1,31 @@
-# stm32f429-smoltcp-rtic
+# stm32f429-smoltcp-mqtt-rtic
 
-Example RTIC & smoltcp app.
+Example MQTT client, smoltcp IP stack, running on RTIC.
 
 ```
+export MAC_ADDRESS="02:00:00:03:02:00"
+export IP_ADDRESS="a.b.c.d"
+export BROKER_IP_ADDRESS="a.b.c.e"
+
 cargo run --release
 
-(HOST) INFO  flashing program (101.63 KiB)
+(HOST) INFO  flashing program (184.70 KiB)
 (HOST) INFO  success!
 ────────────────────────────────────────────────────────────────────────────────
-INFO - Starting
-INFO - Setup: ETH
-INFO - Setup: PHY
-DEBUG - Reset PHY
-DEBUG - Reset complete Bmcr { collision_test: false, force_fd: false, restart_an: false, isolate: false, power_down: false, an_enable: true, force_100: true, loopback: false, soft_reset: false }
-DEBUG - Setup PHY
-DEBUG - Bmcr { collision_test: false, force_fd: true, restart_an: false, isolate: false, power_down: false, an_enable: true, force_100: true, loopback: false, soft_reset: false }
-INFO - Setup: waiting for link
-INFO - Setup: TCP/IP
-INFO - IP: 192.168.1.39 MAC: 02-00-05-06-07-08
-INFO - Setup: net clock timer
-INFO - Setup: net link check timer
-INFO - Setup: net poll timer
-INFO - Initialized
-INFO - Binding to UDP port 12345
-INFO - Got 5 bytes from 192.168.1.abc:36291
-INFO - Got 5 bytes from 192.168.1.abc:45166
+INFO - mqtt-rtic version 0.1.0
+INFO - MAC address: 02-03-04-05-06-07
+INFO - IP address: a.b.c.d
+INFO - Broker IP address: a.b.c.d
+INFO - --- Starting hardware setup
+INFO - Setup GPIO
+INFO - Setup Ethernet
+INFO - Setup phy
+INFO - Waiting for link
+INFO - Setup TCP/IP
+INFO - Setup SysTick
+INFO - Setup network
+INFO - --- Hardware setup done
+INFO - MQTT connected, subscribing to settings
+INFO - Settings update: `led`
 ────────────────────────────────────────────────────────────────────────────────
 ```

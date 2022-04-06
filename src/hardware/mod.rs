@@ -6,12 +6,12 @@ pub mod phy;
 
 pub type NetworkStack = smoltcp_nal::NetworkStack<
     'static,
-    stm32_eth::Eth<'static, 'static>,
+    &'static mut stm32_eth::Eth<'static, 'static>,
     network_clock::NetworkClock,
 >;
 
 pub type NetworkManager = smoltcp_nal::shared::NetworkManager<
     'static,
-    stm32_eth::Eth<'static, 'static>,
+    &'static mut stm32_eth::Eth<'static, 'static>,
     network_clock::NetworkClock,
 >;

@@ -1,12 +1,20 @@
-//#![deny(warnings, clippy::all)]
-//#![forbid(unsafe_code)]
+//! Example MQTT client with smoltcp stack on RTIC
+//!
+//! Inspired by https://github.com/quartiq/thermostat-eem
+
+#![deny(warnings, clippy::all)]
+#![forbid(unsafe_code)]
 #![no_main]
 #![no_std]
 
 //use panic_abort as _; // panic handler
 use panic_rtt_target as _; // panic handler
 
+mod config;
 mod hardware;
+mod net;
+mod settings;
+mod telemetry;
 
 mod built_info {
     include!(concat!(env!("OUT_DIR"), "/built.rs"));
@@ -17,18 +25,26 @@ mod app {
     use crate::built_info;
     use crate::hardware::{
         eth::EthStorage,
-        gpio::{LedBluePin, LedGreenPin, LedRedPin, PhyMdcPin, PhyMdioPin},
-        net::{NetStorage, SRC_MAC},
+        gpio::{LedBluePin, LedGreenPin, LedRedPin},
+        net::NetStorage,
+        network_clock::NetworkClock,
         phy::Phy,
+        NetworkManager, NetworkStack,
     };
-    use log::{debug, info};
+    use crate::{
+        config::Config,
+        net::{NetworkState, NetworkUsers},
+        settings::Settings,
+        telemetry::Telemetry,
+    };
+    use log::info;
+    use rand_core::RngCore;
     use rtt_logger::RTTLogger;
     use rtt_target::rtt_init_print;
     use smoltcp::{
-        iface::{Interface, InterfaceBuilder, NeighborCache, Routes},
+        iface::{InterfaceBuilder, NeighborCache, Routes},
         socket::{TcpSocket, TcpSocketBuffer, UdpSocket, UdpSocketBuffer},
-        time::Instant,
-        wire::{EthernetAddress, Ipv4Address},
+        wire::{IpCidr, Ipv4Address, Ipv4Cidr},
     };
     use stm32_eth::{Eth, EthPins, FilterMode};
     use stm32f4xx_hal::{gpio::Speed, prelude::*, time::Hertz};
@@ -40,17 +56,16 @@ mod app {
 
     #[shared]
     struct Shared {
-        #[lock_free]
-        net: Interface<'static, &'static mut Eth<'static, 'static>>,
+        net: NetworkUsers<Settings, Telemetry>,
+        settings: Settings,
+        telemetry: Telemetry,
     }
 
     #[local]
     struct Local {
-        _led_r: LedRedPin,
+        led_r: LedRedPin,
         activity_led: LedBluePin,
         link_led: LedGreenPin,
-        mdio_pin: PhyMdioPin,
-        mdc_pin: PhyMdcPin,
     }
 
     #[monotonic(binds = SysTick, default = true)]
@@ -60,6 +75,7 @@ mod app {
         eth_storage: EthStorage = EthStorage::new(),
         net_storage: NetStorage = NetStorage::new(),
         eth: Option<Eth<'static, 'static>> = None,
+        net_stack_manager: Option<NetworkManager> = None,
     ])]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
         rtt_init_print!();
@@ -72,14 +88,21 @@ mod app {
             built_info::PKG_NAME,
             built_info::PKG_VERSION
         );
-        info!("{}, {}", built_info::RUSTC_VERSION, built_info::TARGET);
+
+        let config = Config::load_from_env();
 
         info!("--- Starting hardware setup");
 
         // Set up the system clock
         // HCLK must be at least 25MHz to use the ethernet peripheral
+        // The RNG requires the PLL48_CLK to be active
         let rcc = ctx.device.RCC.constrain();
-        let clocks = rcc.cfgr.hclk(64.MHz()).sysclk(SYS_CLOCK_FREQ).freeze();
+        let clocks = rcc
+            .cfgr
+            .hclk(64.MHz())
+            .sysclk(SYS_CLOCK_FREQ)
+            .require_pll48clk()
+            .freeze();
         debug_assert!(clocks.hclk() >= Hertz::MHz(25));
         debug_assert_eq!(clocks.sysclk(), SYS_CLOCK_FREQ);
 
@@ -116,7 +139,7 @@ mod app {
             ctx.device.ETHERNET_MMC,
             &mut ctx.local.eth_storage.rx_ring[..],
             &mut ctx.local.eth_storage.tx_ring[..],
-            FilterMode::FilterDest(SRC_MAC),
+            FilterMode::FilterDest(config.mac_address.0),
             //FilterMode::Promiscuous,
             clocks,
             eth_pins,
@@ -130,19 +153,14 @@ mod app {
         phy.setup();
         info!("Waiting for link");
         while !phy.link_status() {
-            cortex_m::asm::delay(100000);
+            delay.delay_ms(100_u32);
         }
         eth.interrupt_handler();
         eth.enable_interrupt();
         ctx.local.eth.replace(eth);
 
         info!("Setup TCP/IP");
-        let mac = EthernetAddress::from_bytes(&SRC_MAC);
-        info!(
-            "IP: {} MAC: {}",
-            ctx.local.net_storage.ip_addrs[0].address(),
-            mac
-        );
+        ctx.local.net_storage.ip_addrs[0] = IpCidr::Ipv4(Ipv4Cidr::new(config.ip_address, 24));
         let neighbor_cache = NeighborCache::new(&mut ctx.local.net_storage.neighbor_cache[..]);
         let mut routes = Routes::new(&mut ctx.local.net_storage.routes_cache[..]);
         routes
@@ -152,7 +170,7 @@ mod app {
             ctx.local.eth.as_mut().unwrap(),
             &mut ctx.local.net_storage.sockets[..],
         )
-        .hardware_addr(mac.into())
+        .hardware_addr(config.mac_address.into())
         .ip_addrs(&mut ctx.local.net_storage.ip_addrs[..])
         .neighbor_cache(neighbor_cache)
         .routes(routes)
@@ -182,67 +200,104 @@ mod app {
             eth_iface.add_socket(udp_socket);
         }
 
+        info!("Setup SysTick");
         let systick = ctx.core.SYST;
         let mono = Systick::new(systick, clocks.sysclk().raw());
-        //let clock = SystemTimer::new(|| monotonics::now().ticks());
+        let net_clock = NetworkClock::new(|| monotonics::now().ticks());
+
+        info!("Setup network");
+        let random_seed = {
+            let mut rng = ctx.device.RNG.constrain(&clocks);
+            let mut data = [0u8; 4];
+            rng.fill_bytes(&mut data);
+            data
+        };
+        let mut net_stack = NetworkStack::new(eth_iface, net_clock);
+        net_stack.seed_random_port(&random_seed);
+        let stack_manager = NetworkManager::new(net_stack);
+        ctx.local.net_stack_manager.replace(stack_manager);
+        let net = NetworkUsers::new(
+            ctx.local.net_stack_manager.as_mut().unwrap(),
+            mdio_pin,
+            mdc_pin,
+            net_clock,
+            env!("CARGO_BIN_NAME"),
+            config.mac_address,
+            minimq::embedded_nal::Ipv4Addr::from(config.broker_ip_address.0).into(),
+        );
 
         info!("--- Hardware setup done");
 
         link_status::spawn().unwrap();
         poll_ip_stack::spawn().unwrap();
+        settings_update::spawn().unwrap();
+        telemetry_task::spawn().unwrap();
 
         (
-            Shared { net: eth_iface },
+            Shared {
+                net,
+                settings: Settings::default(),
+                telemetry: Telemetry::default(),
+            },
             Local {
-                _led_r: led_r,
+                led_r,
                 activity_led,
                 link_led,
-                mdio_pin,
-                mdc_pin,
             },
             init::Monotonics(mono),
         )
     }
 
+    #[task(local = [led_r], shared = [net, settings], priority = 1)]
+    fn settings_update(ctx: settings_update::Context) {
+        let led = ctx.local.led_r;
+        let mut net = ctx.shared.net;
+        let mut settings = ctx.shared.settings;
+        let s = net.lock(|n| *n.miniconf.settings());
+        settings.lock(|current| *current = s);
+        led.set_state(s.led.into());
+    }
+
+    #[task(shared = [net, telemetry], priority = 1)]
+    fn telemetry_task(ctx: telemetry_task::Context) {
+        let mut net = ctx.shared.net;
+        let mut telemetry = ctx.shared.telemetry;
+        let t: Telemetry = telemetry.lock(|telemetry| {
+            telemetry.dummy += 1;
+            *telemetry
+        });
+        net.lock(|n| n.telemetry.publish(&t));
+        telemetry_task::spawn_after(1_u64.secs()).unwrap();
+    }
+
     #[task(local = [activity_led], shared = [net], priority = 1)]
     fn poll_ip_stack(ctx: poll_ip_stack::Context) {
         let led = ctx.local.activity_led;
-        let net = ctx.shared.net;
-        let time = Instant::from_millis(monotonics::now().ticks() as i64);
-        match net.poll(time) {
-            Ok(something_happened) => {
-                if something_happened {
-                    led.toggle()
-                }
-            }
-            Err(e) => debug!("{:?}", e),
+        let mut net = ctx.shared.net;
+        match net.lock(|n| n.update()) {
+            NetworkState::SettingsChanged => settings_update::spawn().unwrap(),
+            NetworkState::Updated => led.toggle(),
+            NetworkState::NoChange => {}
         }
-        poll_ip_stack::spawn_after(20_u64.millis()).unwrap();
+        poll_ip_stack::spawn_after(10_u64.millis()).unwrap();
     }
 
-    #[task(local = [link_led, mdio_pin, mdc_pin], shared = [net], priority = 1)]
+    #[task(local = [link_led], shared = [net], priority = 1)]
     fn link_status(ctx: link_status::Context) {
-        let link_led = ctx.local.link_led;
-        let mdio = ctx.local.mdio_pin;
-        let mdc = ctx.local.mdc_pin;
-        let net = ctx.shared.net;
-
-        // Poll link status
-        let smi = net.device_mut().smi(mdio, mdc);
-        let phy = Phy::new(smi);
-        if phy.link_status() {
-            link_led.set_high();
+        let led = ctx.local.link_led;
+        let mut net = ctx.shared.net;
+        let link_status = net.lock(|n| n.processor.handle_link());
+        if link_status {
+            led.set_high();
         } else {
-            link_led.set_low();
-            // TODO - close all sockets
+            led.set_low();
         }
-
         link_status::spawn_after(1_u64.secs()).unwrap();
     }
 
     #[task(binds = ETH, shared = [net], priority = 1)]
     fn on_eth(ctx: on_eth::Context) {
-        let net = ctx.shared.net;
-        net.device_mut().interrupt_handler();
+        let mut net = ctx.shared.net;
+        net.lock(|n| n.processor.handle_interrupt());
     }
 }
